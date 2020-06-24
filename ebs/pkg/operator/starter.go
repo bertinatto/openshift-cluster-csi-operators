@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"time"
 
+	dynamicclient "k8s.io/client-go/dynamic"
+	kubeclient "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/klog"
 
 	"github.com/openshift/library-go/pkg/controller/controllercmd"
 	csicontrollerset "github.com/openshift/library-go/pkg/operator/csi/controllerset"
 	goc "github.com/openshift/library-go/pkg/operator/genericoperatorclient"
 	"github.com/openshift/library-go/pkg/operator/v1helpers"
-
-	clientbuilder "github.com/bertinatto/csi-driver-controller/pkg/builder"
 
 	"github.com/openshift/aws-ebs-csi-driver-operator/pkg/apis/operator/v1alpha1"
 	"github.com/openshift/aws-ebs-csi-driver-operator/pkg/generated"
@@ -28,13 +29,9 @@ const (
 
 func RunOperator(ctx context.Context, controllerConfig *controllercmd.ControllerContext) error {
 	// Create clientsets and informers
-	cb, err := clientbuilder.NewClientBuilder("")
-	if err != nil {
-		klog.Fatalf("error creating clients: %v", err)
-	}
-	ctrlCtx := clientbuilder.NewControllerContext(cb, ctx.Done(), operandNamespace)
-	dynamicClient := ctrlCtx.ClientBuilder.DynamicClientOrDie(operandName)
-	kubeClient := ctrlCtx.ClientBuilder.KubeClientOrDie(operandName)
+	dynamicClient := dynamicclient.NewForConfigOrDie(rest.AddUserAgent(controllerConfig.KubeConfig, "dynamic-client"))
+	kubeClient := kubeclient.NewForConfigOrDie(rest.AddUserAgent(controllerConfig.KubeConfig, "kube-client"))
+	kubeInformersForNamespaces := v1helpers.NewKubeInformersForNamespaces(kubeClient, "", operandNamespace, operatorNamespace)
 
 	// Create GenericOperatorclient. This is used by controllers created down below
 	gvr := v1alpha1.SchemeGroupVersion.WithResource("awsebsdrivers")
@@ -42,12 +39,6 @@ func RunOperator(ctx context.Context, controllerConfig *controllercmd.Controller
 	if err != nil {
 		return err
 	}
-
-	kubeInformersForNamespace := v1helpers.NewKubeInformersForNamespaces(
-		kubeClient,
-		"",
-		operandNamespace,
-		operatorNamespace)
 
 	csiControllerSet := csicontrollerset.New(
 		operatorClient,
@@ -58,7 +49,7 @@ func RunOperator(ctx context.Context, controllerConfig *controllercmd.Controller
 	).WithStaticResourcesController(
 		"AWSEBSDriverStaticResources",
 		kubeClient,
-		kubeInformersForNamespace,
+		kubeInformersForNamespaces,
 		generated.Asset,
 		[]string{
 			"namespace.yaml",
@@ -80,7 +71,7 @@ func RunOperator(ctx context.Context, controllerConfig *controllercmd.Controller
 		operandNamespace,
 		generated.MustAsset,
 		kubeClient,
-		ctrlCtx.KubeNamespacedInformerFactory,
+		kubeInformersForNamespaces.InformersFor(operandNamespace),
 		csicontrollerset.WithControllerService("controller.yaml"),
 		csicontrollerset.WithNodeService("node.yaml"),
 		csicontrollerset.WithCloudCredentials(dynamicClient, "credentials.yaml"),
@@ -91,8 +82,7 @@ func RunOperator(ctx context.Context, controllerConfig *controllercmd.Controller
 	}
 
 	klog.Info("Starting the informers")
-	go ctrlCtx.KubeNamespacedInformerFactory.Start(ctx.Done())
-	go kubeInformersForNamespace.Start(ctx.Done())
+	go kubeInformersForNamespaces.Start(ctx.Done())
 	go dynamicInformers.Start(ctx.Done())
 
 	klog.Info("Starting controllerset")
